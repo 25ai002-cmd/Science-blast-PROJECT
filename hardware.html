@@ -151,6 +151,7 @@
           <div class="spec-item"><span class="spec-key">ECHO Pin</span><span class="spec-val">D6 (GPIO 12)</span></div>
           <div class="spec-item"><span class="spec-key">Relay Control Pin</span><span class="spec-val">D2 (GPIO 4) — Active LOW</span></div>
           <div class="spec-item"><span class="spec-key">Buzzer Alert Pin</span><span class="spec-val">D1 (GPIO 5)</span></div>
+          <div class="spec-item"><span class="spec-key">Manual Switch Pin</span><span class="spec-val">D7 (GPIO 13) — Active LOW (Pull-up)</span></div>
           <div class="spec-item"><span class="spec-key">Tank Physical Height</span><span class="spec-val">21.5 cm</span></div>
           <div class="spec-item"><span class="spec-key">Sensing Polling Interval</span><span class="spec-val">500 ms (2 Hz)</span></div>
         </div>
@@ -237,8 +238,10 @@
         <div class="spec-item"><span class="spec-key">Relay IN</span><span class="spec-val">→ D2 (GPIO 4)</span></div>
         <div class="spec-item"><span class="spec-key">Buzzer + (anode)</span><span class="spec-val">→ D1 (GPIO 5)</span></div>
         <div class="spec-item"><span class="spec-key">Buzzer − (cathode)</span><span class="spec-val">→ NodeMCU GND (G)</span></div>
+        <div class="spec-item"><span class="spec-key">Manual Switch / Button</span><span class="spec-val">→ D7 (GPIO 13) to NodeMCU GND (G)</span></div>
         <div class="spec-item"><span class="spec-key">Pump (via relay)</span><span class="spec-val">→ External 5V DC supply (COM &amp; NO)</span></div>
       </div>
+      <p style="font-size:0.75rem; color:var(--text-muted); margin-top:0.75rem;">🛡️ <strong>Threshold Safety Lock:</strong> Physical manual switch controls pump manually below 90% water level. When water level reaches its threshold (≥90% / dist ≤ 2.5cm), manual activation is automatically blocked and motor is stopped immediately to prevent overflow.</p>
     </div>
 
   </main>

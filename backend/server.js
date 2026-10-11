@@ -585,7 +585,7 @@ app.get('/api/sensor', (req, res) => {
 
 // ── POST /api/sensor — NodeMCU sends data here ──────
 app.post('/api/sensor', (req, res) => {
-  const { sensorDistance } = req.body;
+  const { sensorDistance, localMotor, manualMode } = req.body;
 
   if (sensorDistance === undefined || isNaN(sensorDistance)) {
     return res.status(400).json({ success: false, error: 'sensorDistance (number) is required.' });
@@ -626,6 +626,17 @@ app.post('/api/sensor', (req, res) => {
       if (!db.notificationState) db.notificationState = {};
       db.notificationState.dryRunTracker = { startLevel: currentWaterPct, startTime: now, peakLevel: currentWaterPct };
       autoProbingNow = true;
+    }
+  }
+
+  // Sync physical manual switch state from hardware if provided
+  if (manualMode !== undefined) {
+    if (dist <= 2.0 || currentWaterPct >= stopThresh) {
+      db.motor.status = false;
+      db.motor.mode   = 'auto';
+    } else {
+      if (localMotor !== undefined) db.motor.status = !!localMotor;
+      db.motor.mode = manualMode ? 'manual' : 'auto';
     }
   }
 
@@ -866,6 +877,20 @@ app.post('/api/motor', (req, res) => {
   }
   const db = readDB();
   const prevMotor = db.motor.status;
+
+  const stopThresh = (db.settings && db.settings.motorOffThreshold !== undefined) ? db.settings.motorOffThreshold : 90;
+  const currentPct = db.sensor ? db.sensor.waterPercentage : 0;
+  const currentDist = db.sensor ? db.sensor.sensorDistance : 999;
+
+  // 🚨 THRESHOLD SAFETY LOCK: Refuse to start motor manually if tank reached threshold to prevent overflow
+  if (status && (currentPct >= stopThresh || currentDist <= 2.5)) {
+    console.log(`[SAFETY LOCK] Manual start blocked: Water level is ${currentPct}% >= ${stopThresh}%`);
+    return res.status(400).json({
+      success: false,
+      error: `Threshold Reached: Water level is ${currentPct}% (threshold: ${stopThresh}%). Manual pump start is disabled to prevent overflow.`,
+      motor: db.motor
+    });
+  }
 
   // When manually turning pump ON, clear sourceEmpty lockout so user can test pump after refilling resource
   if (status) {

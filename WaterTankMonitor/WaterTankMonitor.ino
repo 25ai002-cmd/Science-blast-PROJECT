@@ -8,15 +8,16 @@
  *
  *  WIRING SUMMARY
  *  ──────────────
- *  HC-SR04 VCC  → NodeMCU 3V
- *  HC-SR04 GND  → NodeMCU G
- *  HC-SR04 TRIG → NodeMCU D5 (GPIO14)
- *  HC-SR04 ECHO → NodeMCU D6 (GPIO12)
+ *  HC-SR04 VCC   → NodeMCU 3V
+ *  HC-SR04 GND   → NodeMCU G
+ *  HC-SR04 TRIG  → NodeMCU D5 (GPIO14)
+ *  HC-SR04 ECHO  → NodeMCU D6 (GPIO12)
  *  Relay    VCC  → NodeMCU VIN (5V)
  *  Relay    GND  → NodeMCU G
  *  Relay    IN   → NodeMCU D2 (GPIO4)
  *  Buzzer   +    → NodeMCU D1 (GPIO5)
  *  Buzzer   -    → NodeMCU G
+ *  Manual Switch → NodeMCU D7 (GPIO13) to GND (Active LOW / Internal Pull-up)
  *
  *  QUICK START GUIDE:
  *  ──────────────────
@@ -62,7 +63,13 @@ const String SERVER_URL = "https://smart-water-tank-iot.onrender.com/api/sensor"
 #define ECHO_PIN    D6   // HC-SR04 Echo pin    → NodeMCU D6
 #define RELAY_PIN   D2   // Relay IN pin        → NodeMCU D2
 #define BUZZER_PIN  D1   // Buzzer positive (+) → NodeMCU D1
+#define SWITCH_PIN  D7   // Physical Manual Switch / Button → NodeMCU D7 (GPIO13) to GND
 #define LED_PIN     LED_BUILTIN // Built-in LED on NodeMCU (GPIO2)
+
+// Physical Switch Type:
+// Set to false for Tactile Push-Button (momentary press-to-toggle) [DEFAULT]
+// Set to true for Rocker/Toggle Switch (flip ON/OFF maintained)
+#define SWITCH_IS_TOGGLE false
 
 // Relay Module Type:
 // Set to true for Active-LOW relay modules (LOW = Relay ON, HIGH = Relay OFF)
@@ -89,6 +96,80 @@ bool              localMotorRunning = false;
 bool              isManualMode = false;
 float             lastSmoothedDistance = -1.0;
 float             lastReportedDistance = -1.0;
+float             currentWaterPct = 0.0;
+float             currentDistance = 15.0;
+
+// Physical manual switch debouncing state
+int               lastSwitchReading = HIGH;
+int               stableSwitchState = HIGH;
+unsigned long     lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY = 50; // 50 ms debounce filter
+
+/* ===========================================================
+   FUNCTION: checkManualSwitch
+   Handles physical push-button / toggle switch on D7.
+   SAFETY LOCK: If water level has reached threshold (>= 90%
+   or distance <= 2.5cm), manual motor start is STRICTLY BLOCKED!
+   =========================================================== */
+void checkManualSwitch() {
+  int reading = digitalRead(SWITCH_PIN);
+
+  if (reading != lastSwitchReading) {
+    lastDebounceTime = millis();
+    lastSwitchReading = reading;
+  }
+
+  if ((millis() - lastDebounceTime) >= DEBOUNCE_DELAY) {
+    if (reading != stableSwitchState) {
+      stableSwitchState = reading;
+
+      // Active LOW (INPUT_PULLUP connected to GND when pressed/switched ON)
+      if (stableSwitchState == LOW) {
+        if (!localMotorRunning) {
+          // 🚨 CRITICAL SAFETY THRESHOLD CHECK:
+          // If water reached threshold, refuse to start manually to prevent overflow!
+          if (currentWaterPct >= 90.0f || currentDistance <= 2.5f) {
+            Serial.println("\n  ⛔ [SAFETY BLOCKED] Water level reached threshold (Tank is full)! Motor will NOT start manually.");
+            // Audible feedback: 3 short warning beeps indicating blocked manual start
+            for (int b = 0; b < 3; b++) {
+              digitalWrite(BUZZER_PIN, HIGH);
+              delay(70);
+              digitalWrite(BUZZER_PIN, LOW);
+              delay(70);
+            }
+          } else {
+            Serial.println("\n  🔘 [PHYSICAL SWITCH] Manual ON triggered -> Starting Motor Pump!");
+            localMotorRunning = true;
+            isManualMode = true;
+            setRelayState(true);
+            // Single short confirmation beep
+            digitalWrite(BUZZER_PIN, HIGH);
+            delay(100);
+            digitalWrite(BUZZER_PIN, LOW);
+          }
+        } else {
+          // If already running and user presses push button -> Turn OFF
+          if (!SWITCH_IS_TOGGLE) {
+            Serial.println("\n  🔘 [PHYSICAL SWITCH] Manual OFF triggered -> Stopping Motor Pump!");
+            localMotorRunning = false;
+            isManualMode = true;
+            setRelayState(false);
+            digitalWrite(BUZZER_PIN, LOW);
+          }
+        }
+      } else {
+        // Switch released or toggle flipped OFF (HIGH)
+        if (SWITCH_IS_TOGGLE && localMotorRunning) {
+          Serial.println("\n  🔘 [PHYSICAL SWITCH] Toggle switch flipped OFF -> Stopping Motor Pump!");
+          localMotorRunning = false;
+          isManualMode = true;
+          setRelayState(false);
+          digitalWrite(BUZZER_PIN, LOW);
+        }
+      }
+    }
+  }
+}
 
 /* ===========================================================
    SETUP — Runs once on power up / reset
@@ -107,6 +188,7 @@ void setup() {
   pinMode(ECHO_PIN,   INPUT);
   pinMode(RELAY_PIN,  OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(SWITCH_PIN, INPUT_PULLUP);
   pinMode(LED_PIN,    OUTPUT);
 
   // Initial actuator states (OFF)
@@ -128,6 +210,9 @@ void setup() {
    =========================================================== */
 
 void loop() {
+  // Check physical manual switch on every loop cycle for instant response
+  checkManualSwitch();
+
   unsigned long now = millis();
 
   // Run at specified send interval
@@ -165,6 +250,8 @@ void loop() {
     // 2. Calculate water height & percentage
     float waterLevel = constrain(SENSOR_TOTAL_HEIGHT - distance, 0.0f, TANK_HEIGHT);
     float waterPct   = constrain((waterLevel / TANK_HEIGHT) * 100.0f, 0.0f, 100.0f);
+    currentDistance  = distance;
+    currentWaterPct  = waterPct;
 
     // 3. Print sensor telemetry to Serial
     printReadings(distance, waterLevel, waterPct);
@@ -196,12 +283,23 @@ void loop() {
       hardwareDryRunLock = false;
     }
 
-    // ── HARDWARE ACTUATOR CONTROL (Dashboard Manual + Local Auto Hybrid) ──
+    // ── HARDWARE ACTUATOR CONTROL (Safety Override + Dashboard Manual + Local Auto Hybrid) ──
     if (hardwareDryRunLock) {
       setRelayState(false);
       digitalWrite(BUZZER_PIN, LOW);
+    } else if (waterPct >= 90.0f || distance <= 2.5f) {
+      // 🚨 ABSOLUTE THRESHOLD SAFETY LOCK:
+      // Even in manual mode or if manual switch is active,
+      // motor pump MUST NOT run when water level has reached threshold!
+      if (localMotorRunning) {
+        Serial.println("  🚨 [SAFETY CUTOFF] Tank reached threshold (>= 90%)! Stopping Motor immediately to prevent overflow.");
+      }
+      localMotorRunning = false;
+      isManualMode = false;
+      setRelayState(false);
+      digitalWrite(BUZZER_PIN, LOW);
     } else if (isManualMode) {
-      // Manual Mode active from Dashboard: Follow user's manual ON/OFF command!
+      // Manual Mode active (via physical switch or dashboard): Only permitted when water level is below threshold!
       setRelayState(localMotorRunning);
     } else {
       // Auto Mode: Autonomous sensor-based threshold control (0 delay)
@@ -350,7 +448,9 @@ void sendToServer(float distance) {
   http.addHeader("Content-Type", "application/json");
   http.setTimeout(10000); // 10 second timeout for Render free tier cold starts
 
-  String body = "{\"sensorDistance\":" + String(distance, 1) + "}";
+  String body = "{\"sensorDistance\":" + String(distance, 1) + 
+                ",\"localMotor\":" + (localMotorRunning ? "true" : "false") + 
+                ",\"manualMode\":" + (isManualMode ? "true" : "false") + "}";
 
   Serial.print("[HTTP] POST → ");
   Serial.print(SERVER_URL);
@@ -372,16 +472,24 @@ void sendToServer(float distance) {
       const char* motorMode = doc["motor"]["mode"];
       const char* alertMsg = doc["alert"]["message"];
 
-      if (motorMode != nullptr && strcmp(motorMode, "manual") == 0) {
-        isManualMode = true;
-      } else {
+      if (currentWaterPct >= 90.0f || currentDistance <= 2.5f) {
+        // Enforce absolute safety cutoff: Motor MUST NOT run if tank reached threshold
+        localMotorRunning = false;
         isManualMode = false;
-      }
+        setRelayState(false);
+        digitalWrite(BUZZER_PIN, LOW);
+      } else {
+        if (motorMode != nullptr && strcmp(motorMode, "manual") == 0) {
+          isManualMode = true;
+        } else {
+          isManualMode = false;
+        }
 
-      // Update physical actuators and keep local state synchronized
-      localMotorRunning = motorOn;
-      setRelayState(motorOn);
-      digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+        // Update physical actuators and keep local state synchronized
+        localMotorRunning = motorOn;
+        setRelayState(motorOn);
+        digitalWrite(BUZZER_PIN, buzzerOn ? HIGH : LOW);
+      }
 
       // Brief flash to indicate successful hardware-software sync
       digitalWrite(LED_PIN, HIGH);

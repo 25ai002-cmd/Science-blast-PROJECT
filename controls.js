@@ -92,6 +92,19 @@ async function toggleMotor() {
   const isCurrentlyOn = (toggleBtn && toggleBtn.textContent.trim().toLowerCase().includes('turn off')) || !!state.motorOn;
   const newStatus = !isCurrentlyOn;
 
+  // 🚨 THRESHOLD SAFETY CHECK: Prevent manual pump start when water level is at or above threshold
+  const stopThresh = (state.settings && state.settings.motorOffThreshold !== undefined) ? state.settings.motorOffThreshold : 90;
+  const currentPct = (state.sensor && state.sensor.waterPercentage !== undefined) ? state.sensor.waterPercentage : (state.waterPercentage || 0);
+
+  if (newStatus && currentPct >= stopThresh) {
+    showFeedback('settings-feedback', `⛔ Cannot start pump: Water level is ${currentPct}% (threshold: ${stopThresh}%). Manual pump start is disabled to prevent overflow!`, 'error');
+    if (toggleBtn) {
+      toggleBtn.textContent = isCurrentlyOn ? 'Turn OFF Pump' : 'Turn ON Pump';
+      toggleBtn.className   = isCurrentlyOn ? 'btn-primary btn-danger' : 'btn-primary';
+    }
+    return;
+  }
+
   if (toggleBtn) {
     toggleBtn.textContent = newStatus ? 'Turn OFF Pump' : 'Turn ON Pump';
     toggleBtn.className   = newStatus ? 'btn-primary btn-danger' : 'btn-primary';
@@ -106,15 +119,19 @@ async function toggleMotor() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ status: newStatus, mode: 'manual' }),
       });
-      if (!response.ok) throw new Error();
-      const data = await response.json();
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        showFeedback('settings-feedback', data.error || '❌ Failed to toggle motor on server.', 'error');
+        syncControlsUI({ motor: { status: isCurrentlyOn, mode: state.motorManual ? 'manual' : 'auto' } });
+        return;
+      }
       state.motorOn     = data.status;
       state.motorManual = (data.mode === 'manual');
       state.apiMode     = true;
       syncControlsUI({ motor: data });
       showFeedback('settings-feedback', data.status ? '⚡ Pump started successfully.' : '⚡ Pump stopped.', 'success');
     } catch {
-      showFeedback('settings-feedback', '❌ Failed to toggle motor on server.', 'error');
+      showFeedback('settings-feedback', '❌ Network error: Failed to toggle motor on server.', 'error');
       syncControlsUI({ motor: { status: isCurrentlyOn, mode: state.motorManual ? 'manual' : 'auto' } });
     }
   } else {
